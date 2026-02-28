@@ -335,19 +335,19 @@ def main() -> None:
     )
 
     best_iou = -1.0
-    epoch_pbar = tqdm(range(1, cfg.epochs + 1), desc="[stage2] epochs")
+    progress_disable = not (hasattr(sys.stderr, "isatty") and sys.stderr.isatty())
+    epoch_pbar = tqdm(
+        range(1, cfg.epochs + 1),
+        desc="[stage2] epochs",
+        dynamic_ncols=True,
+        disable=progress_disable,
+    )
     for epoch in epoch_pbar:
         model.train()
         t0 = time()
         train_loss = 0.0
         n_train_batches = 0
-        train_pbar = tqdm(
-            train_loader,
-            desc=f"[stage2] train {epoch}/{cfg.epochs}",
-            leave=False,
-            position=1,
-        )
-        for x, y in train_pbar:
+        for x, y in train_loader:
             x = x.to(cfg.device, non_blocking=True)
             y = y.to(cfg.device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
@@ -358,7 +358,7 @@ def main() -> None:
             train_loss += float(loss.item()) * x.size(0)
             n_train_batches += 1
             if cfg.log_interval > 0 and (n_train_batches % cfg.log_interval) == 0:
-                train_pbar.set_postfix(loss=f"{float(loss.item()):.4f}", lr=f"{opt.param_groups[0].get('lr', cfg.lr):g}")
+                epoch_pbar.set_postfix(loss=f"{float(loss.item()):.4f}", lr=f"{opt.param_groups[0].get('lr', cfg.lr):g}")
         train_loss /= float(cfg.samples_per_epoch)
 
         model.eval()
