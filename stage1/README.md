@@ -12,14 +12,6 @@
 
 もし手元に正解マスクがある場合は、`--label-source file --mask-suffix _grid_mask.png` のように指定してください。
 
-## 依存関係
-
-- `torch`
-- `numpy`
-- `pillow`
-- `opencv-python`（`--label-source auto` の場合）
-- `tqdm`
-
 ## 学習
 
 ```bash
