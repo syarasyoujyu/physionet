@@ -29,7 +29,7 @@ def discover_records(
         raise ValueError("max_data_num must be >= 1 (or None).")
     data_root = data_root.resolve()
     records: list[Record] = []
-    for img_path in sorted(data_root.glob("**/*.png")):
+    for img_path in tqdm(sorted(data_root.glob("**/*.png"))):
         if img_path.name.endswith(("_mask.png", "_grid_mask.png", "_wave_mask.png")):
             continue
         stem = img_path.with_suffix("").name
