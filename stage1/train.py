@@ -26,6 +26,8 @@ class TrainConfig:
     data_root: str
     out_dir: str
     max_data_num: int | None
+    init_from: str | None
+    init_strict: bool
     epochs: int
     lr: float
     batch_size: int
@@ -125,11 +127,51 @@ def _setup_logging(out_dir: Path, level: str) -> logging.Logger:
     return logger
 
 
+def _load_checkpoint_state_dict(path: Path) -> dict[str, torch.Tensor]:
+    obj = torch.load(path, map_location="cpu")
+    if isinstance(obj, dict) and "model" in obj and isinstance(obj["model"], dict):
+        return obj["model"]
+    if isinstance(obj, dict):
+        return obj  # assume raw state_dict
+    raise TypeError(f"unsupported checkpoint format: {type(obj)}")
+
+
+def _init_model_from_checkpoint(logger: logging.Logger, model: torch.nn.Module, *, path: Path, strict: bool) -> None:
+    state = _load_checkpoint_state_dict(path)
+    if strict:
+        model.load_state_dict(state, strict=True)
+        logger.info("init_from=%s strict=True loaded_keys=%d", str(path), len(state))
+        return
+
+    # strict=False still errors on size mismatch, so filter those out.
+    cur = model.state_dict()
+    filtered: dict[str, torch.Tensor] = {}
+    skipped_mismatch = 0
+    for k, v in state.items():
+        if k not in cur:
+            continue
+        if hasattr(v, "shape") and hasattr(cur[k], "shape") and v.shape != cur[k].shape:
+            skipped_mismatch += 1
+            continue
+        filtered[k] = v
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
+    logger.info(
+        "init_from=%s strict=False loaded=%d missing=%d unexpected=%d skipped_mismatch=%d",
+        str(path),
+        len(filtered),
+        len(missing),
+        len(unexpected),
+        skipped_mismatch,
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", type=str, default=".")
     p.add_argument("--out-dir", type=str, default="runs/stage1")
     p.add_argument("--max-data-num", type=int, default=None, help="maximum number of records to use (default: all)")
+    p.add_argument("--init-from", type=str, default=None, help="initialize model weights from a checkpoint (.pt)")
+    p.add_argument("--init-strict", action="store_true", help="strictly require all keys/shapes to match when loading --init-from")
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--batch-size", type=int, default=16)
@@ -153,6 +195,8 @@ def main() -> None:
         data_root=args.data_root,
         out_dir=args.out_dir,
         max_data_num=args.max_data_num,
+        init_from=args.init_from,
+        init_strict=bool(args.init_strict),
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
@@ -238,7 +282,10 @@ def main() -> None:
         worker_init_fn=_worker_init_fn if cfg.num_workers > 0 else None,
     )
 
-    model = UNetRes(in_channels=3, base_channels=cfg.base_channels, out_channels=1).to(cfg.device)
+    model = UNetRes(in_channels=3, base_channels=cfg.base_channels, out_channels=1)
+    if cfg.init_from is not None:
+        _init_model_from_checkpoint(logger, model, path=Path(cfg.init_from), strict=cfg.init_strict)
+    model = model.to(cfg.device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     loss_fn = BCEWithLogitsLoss2D(pos_weight=cfg.pos_weight).to(cfg.device)
     logger.info(
@@ -281,14 +328,7 @@ def main() -> None:
         val_loss = 0.0
         val_iou = 0.0
         n_seen = 0
-        n_val_batches = 0
-        val_pbar = tqdm(
-            val_loader,
-            desc=f"[stage1] val {epoch}/{cfg.epochs}",
-            leave=False,
-            position=1,
-        )
-        for x, y in val_pbar:
+        for x, y in val_loader:
             x = x.to(cfg.device, non_blocking=True)
             y = y.to(cfg.device, non_blocking=True)
             with torch.no_grad():
@@ -298,10 +338,6 @@ def main() -> None:
             val_loss += float(loss.item()) * bs
             val_iou += iou_from_logits(logits, y) * bs
             n_seen += bs
-            n_val_batches += 1
-            if cfg.log_interval > 0 and (n_val_batches % cfg.log_interval) == 0:
-                batch_iou = float(iou_from_logits(logits, y))
-                val_pbar.set_postfix(loss=f"{float(loss.item()):.4f}", iou=f"{batch_iou:.4f}")
         val_loss /= max(1, n_seen)
         val_iou /= max(1, n_seen)
 

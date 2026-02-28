@@ -19,6 +19,7 @@ python3 -m stage2.train \
   --data-root . \
   --out-dir runs/stage2 \
   --max-data-num 1000 \
+  --init-from runs/stage2/checkpoints/best.pt \
   --log-level INFO \
   --log-interval 50 \
   --epochs 200 \
