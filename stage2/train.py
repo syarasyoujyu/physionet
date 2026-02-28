@@ -4,6 +4,9 @@ import argparse
 import json
 import random
 import hashlib
+import logging
+import platform
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import time
@@ -37,6 +40,8 @@ class TrainConfig:
     line_width: int
     positive_sample_prob: float
     val_fraction: float
+    log_level: str
+    log_interval: int
 
 
 def _seed_all(seed: int) -> None:
@@ -86,6 +91,39 @@ def _split_records(records: list, val_fraction: float) -> tuple[list, list]:
     return train, val
 
 
+def _setup_logging(out_dir: Path, level: str) -> logging.Logger:
+    lvl = getattr(logging, level.upper(), None)
+    if not isinstance(lvl, int):
+        raise ValueError(f"invalid log level: {level!r}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("stage2.train")
+    logger.setLevel(lvl)
+    logger.propagate = False
+    logger.handlers.clear()
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    class _TqdmHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                msg = self.format(record)
+                tqdm.write(msg)
+            except Exception:
+                self.handleError(record)
+
+    th = _TqdmHandler()
+    th.setLevel(lvl)
+    th.setFormatter(fmt)
+    logger.addHandler(th)
+
+    fh = logging.FileHandler(out_dir / "train.log", encoding="utf-8")
+    fh.setLevel(lvl)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    return logger
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", type=str, default=".")
@@ -105,6 +143,8 @@ def main() -> None:
     p.add_argument("--cache-dir", type=str, default="runs/stage2/masks_cache")
     p.add_argument("--line-width", type=int, default=2)
     p.add_argument("--positive-sample-prob", type=float, default=0.7)
+    p.add_argument("--log-level", type=str, default="INFO", help="logging level (DEBUG/INFO/WARNING/ERROR)")
+    p.add_argument("--log-interval", type=int, default=50, help="log every N train/val batches")
     args = p.parse_args()
 
     cfg = TrainConfig(
@@ -125,6 +165,8 @@ def main() -> None:
         line_width=args.line_width,
         positive_sample_prob=args.positive_sample_prob,
         val_fraction=args.val_fraction,
+        log_level=args.log_level,
+        log_interval=args.log_interval,
     )
 
     out_dir = Path(cfg.out_dir)
@@ -132,10 +174,23 @@ def main() -> None:
     (out_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, ensure_ascii=False))
 
+    logger = _setup_logging(out_dir, cfg.log_level)
+    logger.info("stage2 training start")
+    logger.info("python=%s platform=%s", sys.version.split()[0], platform.platform())
+    logger.info(
+        "torch=%s cuda_available=%s device=%s",
+        getattr(torch, "__version__", "unknown"),
+        torch.cuda.is_available(),
+        cfg.device,
+    )
+
     _seed_all(cfg.seed)
+    logger.info("seed=%d", cfg.seed)
 
     records = discover_records(Path(cfg.data_root), max_data_num=cfg.max_data_num, seed=cfg.seed)
+    logger.info("records=%d (max_data_num=%s)", len(records), cfg.max_data_num)
     train_records, val_records = _split_records(records, cfg.val_fraction)
+    logger.info("train_records=%d val_records=%d val_fraction=%.4f", len(train_records), len(val_records), cfg.val_fraction)
     train_ds = WaveformPatchDataset(
         train_records,
         patch_size=cfg.patch_size,
@@ -153,6 +208,15 @@ def main() -> None:
         cache_dir=None if cfg.cache_dir is None else Path(cfg.cache_dir),
         line_width=cfg.line_width,
         positive_sample_prob=cfg.positive_sample_prob,
+    )
+    logger.info(
+        "dataset patch_size=%d samples_per_epoch=%d val_samples=%d cache_dir=%s line_width=%d positive_sample_prob=%.4f",
+        cfg.patch_size,
+        cfg.samples_per_epoch,
+        cfg.val_samples,
+        cfg.cache_dir,
+        cfg.line_width,
+        cfg.positive_sample_prob,
     )
 
     train_loader = DataLoader(
@@ -175,13 +239,28 @@ def main() -> None:
     model = UNetRes(in_channels=3, base_channels=cfg.base_channels, out_channels=1).to(cfg.device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     loss_fn = IoULoss().to(cfg.device)
+    logger.info(
+        "model=UNetRes base_channels=%d batch_size=%d lr=%g num_workers=%d",
+        cfg.base_channels,
+        cfg.batch_size,
+        cfg.lr,
+        cfg.num_workers,
+    )
 
     best_iou = -1.0
-    for epoch in range(1, cfg.epochs + 1):
+    epoch_pbar = tqdm(range(1, cfg.epochs + 1), desc="[stage2] epochs")
+    for epoch in epoch_pbar:
         model.train()
         t0 = time()
         train_loss = 0.0
-        for x, y in tqdm(train_loader, desc=f"[stage2] train epoch {epoch}/{cfg.epochs}", leave=False):
+        n_train_batches = 0
+        train_pbar = tqdm(
+            train_loader,
+            desc=f"[stage2] train {epoch}/{cfg.epochs}",
+            leave=False,
+            position=1,
+        )
+        for x, y in train_pbar:
             x = x.to(cfg.device, non_blocking=True)
             y = y.to(cfg.device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
@@ -190,13 +269,23 @@ def main() -> None:
             loss.backward()
             opt.step()
             train_loss += float(loss.item()) * x.size(0)
+            n_train_batches += 1
+            if cfg.log_interval > 0 and (n_train_batches % cfg.log_interval) == 0:
+                train_pbar.set_postfix(loss=f"{float(loss.item()):.4f}", lr=f"{opt.param_groups[0].get('lr', cfg.lr):g}")
         train_loss /= float(cfg.samples_per_epoch)
 
         model.eval()
         val_loss = 0.0
         val_iou = 0.0
         n_seen = 0
-        for x, y in tqdm(val_loader, desc=f"[stage2] val epoch {epoch}/{cfg.epochs}", leave=False):
+        n_val_batches = 0
+        val_pbar = tqdm(
+            val_loader,
+            desc=f"[stage2] val {epoch}/{cfg.epochs}",
+            leave=False,
+            position=1,
+        )
+        for x, y in val_pbar:
             x = x.to(cfg.device, non_blocking=True)
             y = y.to(cfg.device, non_blocking=True)
             with torch.no_grad():
@@ -206,11 +295,21 @@ def main() -> None:
             val_loss += float(loss.item()) * bs
             val_iou += iou_from_logits(logits, y) * bs
             n_seen += bs
+            n_val_batches += 1
+            if cfg.log_interval > 0 and (n_val_batches % cfg.log_interval) == 0:
+                batch_iou = float(iou_from_logits(logits, y))
+                val_pbar.set_postfix(loss=f"{float(loss.item()):.4f}", iou=f"{batch_iou:.4f}")
         val_loss /= max(1, n_seen)
         val_iou /= max(1, n_seen)
 
         dt = time() - t0
-        print(
+        epoch_pbar.set_postfix(
+            train_loss=f"{train_loss:.4f}",
+            val_loss=f"{val_loss:.4f}",
+            val_iou=f"{val_iou:.4f}",
+            best_iou=f"{best_iou:.4f}" if best_iou >= 0 else "n/a",
+        )
+        tqdm.write(
             json.dumps(
                 {
                     "epoch": epoch,

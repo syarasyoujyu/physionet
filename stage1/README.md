@@ -27,6 +27,8 @@ python3 -m stage1.train \
   --data-root . \
   --out-dir runs/stage1 \
   --max-data-num 1000 \
+  --log-level INFO \
+  --log-interval 50 \
   --epochs 300 \
   --lr 0.005 \
   --batch-size 16 \
