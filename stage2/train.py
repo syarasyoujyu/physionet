@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
-import random
 import hashlib
+import json
 import logging
 import platform
+import random
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,7 +15,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from stage2.data import WaveformPatchDataset, discover_records, precompute_waveform_masks
+from stage2.data import (
+    WaveformPatchDataset,
+    discover_records,
+    precompute_waveform_masks,
+)
 from stage2.losses import IoULoss
 from stage2.metrics import iou_from_logits
 from stage2.model import UNetRes
@@ -29,6 +33,8 @@ class TrainConfig:
     init_from: str | None
     init_strict: bool
     precompute_cache: bool
+    train_fraction: float
+    val_fraction: float
     epochs: int
     lr: float
     batch_size: int
@@ -42,7 +48,6 @@ class TrainConfig:
     cache_dir: str | None
     line_width: int
     positive_sample_prob: float
-    val_fraction: float
     log_level: str
     log_interval: int
 
@@ -183,13 +188,30 @@ def main() -> None:
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--val-fraction", type=float, default=0.1)
+    p.add_argument("--val-fraction", type=float, default=0.2, help="fraction of records used for validation")
+    p.add_argument(
+        "--train-fraction",
+        type=float,
+        default=None,
+        help="fraction of records used for training (overrides --val-fraction)",
+    )
     p.add_argument("--cache-dir", type=str, default="runs/stage2/masks_cache")
     p.add_argument("--line-width", type=int, default=2)
     p.add_argument("--positive-sample-prob", type=float, default=0.7)
     p.add_argument("--log-level", type=str, default="INFO", help="logging level (DEBUG/INFO/WARNING/ERROR)")
     p.add_argument("--log-interval", type=int, default=50, help="log every N train/val batches")
     args = p.parse_args()
+
+    if args.train_fraction is not None:
+        train_fraction = float(args.train_fraction)
+        if not (0.0 < train_fraction <= 1.0):
+            raise ValueError("--train-fraction must be in (0, 1].")
+        val_fraction = 1.0 - train_fraction
+    else:
+        val_fraction = float(args.val_fraction)
+        if not (0.0 <= val_fraction < 1.0):
+            raise ValueError("--val-fraction must be in [0, 1).")
+        train_fraction = 1.0 - val_fraction
 
     cfg = TrainConfig(
         data_root=args.data_root,
@@ -198,6 +220,8 @@ def main() -> None:
         init_from=args.init_from,
         init_strict=bool(args.init_strict),
         precompute_cache=bool(args.precompute_cache),
+        train_fraction=train_fraction,
+        val_fraction=val_fraction,
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
@@ -211,7 +235,6 @@ def main() -> None:
         cache_dir=args.cache_dir,
         line_width=args.line_width,
         positive_sample_prob=args.positive_sample_prob,
-        val_fraction=args.val_fraction,
         log_level=args.log_level,
         log_interval=args.log_interval,
     )
@@ -245,7 +268,13 @@ def main() -> None:
         )
         logger.info("precompute_cache done: %s", stats)
     train_records, val_records = _split_records(records, cfg.val_fraction)
-    logger.info("train_records=%d val_records=%d val_fraction=%.4f", len(train_records), len(val_records), cfg.val_fraction)
+    logger.info(
+        "train_records=%d val_records=%d train_fraction=%.4f val_fraction=%.4f",
+        len(train_records),
+        len(val_records),
+        cfg.train_fraction,
+        cfg.val_fraction,
+    )
     train_ds = WaveformPatchDataset(
         train_records,
         patch_size=cfg.patch_size,

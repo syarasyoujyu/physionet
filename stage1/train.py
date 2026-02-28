@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
-import random
 import hashlib
+import json
 import logging
 import platform
+import random
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,7 +15,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from stage1.data import GridIntersectionPatchDataset, discover_records, precompute_grid_intersection_labels
+from stage1.data import (
+    GridIntersectionPatchDataset,
+    discover_records,
+    precompute_grid_intersection_labels,
+)
 from stage1.losses import BCEWithLogitsLoss2D
 from stage1.metrics import iou_from_logits
 from stage1.model import UNetRes
@@ -29,6 +33,8 @@ class TrainConfig:
     init_from: str | None
     init_strict: bool
     precompute_cache: bool
+    train_fraction: float
+    val_fraction: float
     epochs: int
     lr: float
     batch_size: int
@@ -43,7 +49,6 @@ class TrainConfig:
     mask_suffix: str
     label_cache_dir: str | None
     pos_weight: float | None
-    val_fraction: float
     log_level: str
     log_interval: int
 
@@ -184,7 +189,13 @@ def main() -> None:
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--val-fraction", type=float, default=0.1)
+    p.add_argument("--val-fraction", type=float, default=0.2, help="fraction of records used for validation")
+    p.add_argument(
+        "--train-fraction",
+        type=float,
+        default=None,
+        help="fraction of records used for training (overrides --val-fraction)",
+    )
     p.add_argument("--label-source", type=str, choices=["auto", "file"], default="auto")
     p.add_argument("--mask-suffix", type=str, default="_grid_mask.png")
     p.add_argument("--label-cache-dir", type=str, default="runs/stage1/labels_cache")
@@ -193,6 +204,17 @@ def main() -> None:
     p.add_argument("--log-interval", type=int, default=50, help="log every N train/val batches")
     args = p.parse_args()
 
+    if args.train_fraction is not None:
+        train_fraction = float(args.train_fraction)
+        if not (0.0 < train_fraction <= 1.0):
+            raise ValueError("--train-fraction must be in (0, 1].")
+        val_fraction = 1.0 - train_fraction
+    else:
+        val_fraction = float(args.val_fraction)
+        if not (0.0 <= val_fraction < 1.0):
+            raise ValueError("--val-fraction must be in [0, 1).")
+        train_fraction = 1.0 - val_fraction
+
     cfg = TrainConfig(
         data_root=args.data_root,
         out_dir=args.out_dir,
@@ -200,6 +222,8 @@ def main() -> None:
         init_from=args.init_from,
         init_strict=bool(args.init_strict),
         precompute_cache=bool(args.precompute_cache),
+        train_fraction=train_fraction,
+        val_fraction=val_fraction,
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
@@ -214,7 +238,6 @@ def main() -> None:
         mask_suffix=args.mask_suffix,
         label_cache_dir=args.label_cache_dir if args.label_source == "auto" else None,
         pos_weight=args.pos_weight,
-        val_fraction=args.val_fraction,
         log_level=args.log_level,
         log_interval=args.log_interval,
     )
@@ -249,7 +272,13 @@ def main() -> None:
         )
         logger.info("precompute_cache done: %s", stats)
     train_records, val_records = _split_records(records, cfg.val_fraction)
-    logger.info("train_records=%d val_records=%d val_fraction=%.4f", len(train_records), len(val_records), cfg.val_fraction)
+    logger.info(
+        "train_records=%d val_records=%d train_fraction=%.4f val_fraction=%.4f",
+        len(train_records),
+        len(val_records),
+        cfg.train_fraction,
+        cfg.val_fraction,
+    )
 
     train_ds = GridIntersectionPatchDataset(
         train_records,
