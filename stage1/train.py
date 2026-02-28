@@ -22,6 +22,7 @@ from stage1.model import UNetRes
 class TrainConfig:
     data_root: str
     out_dir: str
+    max_data_num: int | None
     epochs: int
     lr: float
     batch_size: int
@@ -90,6 +91,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", type=str, default=".")
     p.add_argument("--out-dir", type=str, default="runs/stage1")
+    p.add_argument("--max-data-num", type=int, default=None, help="maximum number of records to use (default: all)")
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--batch-size", type=int, default=16)
@@ -110,6 +112,7 @@ def main() -> None:
     cfg = TrainConfig(
         data_root=args.data_root,
         out_dir=args.out_dir,
+        max_data_num=args.max_data_num,
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
@@ -134,7 +137,7 @@ def main() -> None:
 
     _seed_all(cfg.seed)
 
-    records = discover_records(Path(cfg.data_root))
+    records = discover_records(Path(cfg.data_root), max_data_num=cfg.max_data_num, seed=cfg.seed)
     train_records, val_records = _split_records(records, cfg.val_fraction)
 
     train_ds = GridIntersectionPatchDataset(

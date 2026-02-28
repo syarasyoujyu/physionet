@@ -18,9 +18,9 @@
 python3 -m stage2.train \
   --data-root . \
   --out-dir runs/stage2 \
+  --max-data-num 1000 \
   --epochs 200 \
   --lr 0.001 \
   --batch-size 16 \
   --patch-size 256
 ```
-

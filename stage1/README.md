@@ -26,6 +26,7 @@
 python3 -m stage1.train \
   --data-root . \
   --out-dir runs/stage1 \
+  --max-data-num 1000 \
   --epochs 300 \
   --lr 0.005 \
   --batch-size 16 \
@@ -35,4 +36,3 @@ python3 -m stage1.train \
 ## 出力
 
 - `runs/stage1/checkpoints/best.pt` : ベストモデル
-

@@ -18,9 +18,18 @@ class Record:
     json_path: Path
 
 
-def discover_records(data_root: Path) -> list[Record]:
+def discover_records(
+    data_root: Path,
+    *,
+    max_data_num: int | None = None,
+    seed: int | None = None,
+) -> list[Record]:
+    if max_data_num is not None and max_data_num < 1:
+        raise ValueError("max_data_num must be >= 1 (or None).")
     data_root = data_root.resolve()
     records: list[Record] = []
+    rng = random.Random(seed) if max_data_num is not None else None
+    seen = 0
     for img_path in sorted(data_root.glob("**/*.png")):
         if img_path.name.endswith(("_mask.png", "_grid_mask.png", "_wave_mask.png")):
             continue
@@ -28,7 +37,20 @@ def discover_records(data_root: Path) -> list[Record]:
         json_path = img_path.with_suffix(".json")
         if not json_path.exists():
             continue
-        records.append(Record(stem=stem, image_path=img_path, json_path=json_path))
+        r = Record(stem=stem, image_path=img_path, json_path=json_path)
+        if max_data_num is None:
+            records.append(r)
+            continue
+
+        # reservoir sampling (uniform without replacement)
+        seen += 1
+        if len(records) < max_data_num:
+            records.append(r)
+            continue
+        assert rng is not None
+        j = rng.randrange(0, seen)
+        if j < max_data_num:
+            records[j] = r
     return records
 
 
