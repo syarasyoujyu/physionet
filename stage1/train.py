@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from stage1.data import GridIntersectionPatchDataset, discover_records
+from stage1.data import GridIntersectionPatchDataset, discover_records, precompute_grid_intersection_labels
 from stage1.losses import BCEWithLogitsLoss2D
 from stage1.metrics import iou_from_logits
 from stage1.model import UNetRes
@@ -28,6 +28,7 @@ class TrainConfig:
     max_data_num: int | None
     init_from: str | None
     init_strict: bool
+    precompute_cache: bool
     epochs: int
     lr: float
     batch_size: int
@@ -172,6 +173,7 @@ def main() -> None:
     p.add_argument("--max-data-num", type=int, default=None, help="maximum number of records to use (default: all)")
     p.add_argument("--init-from", type=str, default=None, help="initialize model weights from a checkpoint (.pt)")
     p.add_argument("--init-strict", action="store_true", help="strictly require all keys/shapes to match when loading --init-from")
+    p.add_argument("--precompute-cache", action="store_true", help="precompute and cache masks before training (shows progress)")
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--batch-size", type=int, default=16)
@@ -197,6 +199,7 @@ def main() -> None:
         max_data_num=args.max_data_num,
         init_from=args.init_from,
         init_strict=bool(args.init_strict),
+        precompute_cache=bool(args.precompute_cache),
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
@@ -236,6 +239,15 @@ def main() -> None:
 
     records = discover_records(Path(cfg.data_root), max_data_num=cfg.max_data_num, seed=cfg.seed)
     logger.info("records=%d (max_data_num=%s)", len(records), cfg.max_data_num)
+    if cfg.precompute_cache:
+        stats = precompute_grid_intersection_labels(
+            records,
+            label_source=cfg.label_source,  # type: ignore[arg-type]
+            mask_suffix=cfg.mask_suffix,
+            label_cache_dir=None if cfg.label_cache_dir is None else Path(cfg.label_cache_dir),
+            progress=True,
+        )
+        logger.info("precompute_cache done: %s", stats)
     train_records, val_records = _split_records(records, cfg.val_fraction)
     logger.info("train_records=%d val_records=%d val_fraction=%.4f", len(train_records), len(val_records), cfg.val_fraction)
 

@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 import torch
 from PIL import Image
+from tqdm import tqdm
 
 
 @dataclasses.dataclass(frozen=True)
@@ -194,3 +195,48 @@ class GridIntersectionPatchDataset(torch.utils.data.Dataset):
         x = _pil_to_chw_float01(rgb_patch)
         y = _pil_mask_to_hw_float01(label_patch)
         return x, y
+
+
+def precompute_grid_intersection_labels(
+    records: list[Record],
+    *,
+    label_source: Literal["auto", "file"] = "auto",
+    mask_suffix: str = "_grid_mask.png",
+    label_cache_dir: Path | None = None,
+    progress: bool = True,
+) -> dict[str, int]:
+    """
+    label_source=auto の場合に、全recordの交点マスクを事前生成して保存する。
+    進捗(%)を見たい時や、学習中の遅延を減らしたい時に使う。
+    """
+    if label_source == "file":
+        return {"seen": len(records), "created": 0, "skipped": len(records)}
+
+    if label_cache_dir is not None:
+        label_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    seen = 0
+    created = 0
+    skipped = 0
+    it = records
+    if progress:
+        it = tqdm(records, desc="[stage1] precompute labels", unit="rec")
+    for r in it:
+        seen += 1
+        if label_cache_dir is not None:
+            out_path = label_cache_dir / f"{r.stem}{mask_suffix}"
+        else:
+            out_path = r.image_path.with_name(f"{r.stem}{mask_suffix}")
+
+        if out_path.exists():
+            skipped += 1
+            continue
+
+        rgb = _load_rgb(r.image_path)
+        meta = _load_json(r.json_path)
+        mask = _auto_grid_intersection_mask(rgb, meta)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        mask.save(out_path)
+        created += 1
+
+    return {"seen": seen, "created": created, "skipped": skipped}

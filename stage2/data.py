@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
+from tqdm import tqdm
 
 
 @dataclasses.dataclass(frozen=True)
@@ -219,3 +220,47 @@ class WaveformPatchDataset(torch.utils.data.Dataset):
         x = _pil_to_chw_float01(rgb_patch)
         y = _pil_mask_to_hw_float01(mask_patch)
         return x, y
+
+
+def precompute_waveform_masks(
+    records: list[Record],
+    *,
+    cache_dir: Path | None = None,
+    mask_suffix: str = "_wave_mask.png",
+    line_width: int = 2,
+    progress: bool = True,
+) -> dict[str, int]:
+    """
+    jsonから波形マスクを事前生成して保存する。
+    進捗(%)を見たい時や、学習中の遅延を減らしたい時に使う。
+    """
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    seen = 0
+    created = 0
+    skipped = 0
+    it = records
+    if progress:
+        it = tqdm(records, desc="[stage2] precompute masks", unit="rec")
+
+    for r in it:
+        seen += 1
+        if cache_dir is not None:
+            out_path = cache_dir / f"{r.stem}{mask_suffix}"
+        else:
+            out_path = r.image_path.with_name(f"{r.stem}{mask_suffix}")
+
+        if out_path.exists():
+            skipped += 1
+            continue
+
+        rgb = _load_rgb(r.image_path)
+        meta = _load_json(r.json_path)
+        w, h = rgb.size
+        mask = build_waveform_mask_from_json(meta, width=w, height=h, line_width=line_width)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        mask.save(out_path)
+        created += 1
+
+    return {"seen": seen, "created": created, "skipped": skipped}
