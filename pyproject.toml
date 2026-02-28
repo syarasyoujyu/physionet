@@ -5,8 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "dataclasses>=0.8",
+    "logging>=0.4.9.6",
     "numpy>=2.4.2",
     "opencv-python>=4.13.0.92",
+    "pathlib>=1.0.1",
     "pillow>=12.1.1",
     "torch>=2.10.0",
     "tqdm>=4.67.3",

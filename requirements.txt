@@ -1,6 +1,0 @@
-torch
-numpy
-pillow
-opencv-python
-tqdm
-
