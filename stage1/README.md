@@ -28,6 +28,19 @@ python3 -m stage1.train \
   --patch-size 256
 ```
 
+## 推論（可視化）
+
+推論結果とGT（交点マスク）をmatplotlibで並べて保存します。
+
+```bash
+python3 -m stage1.inference \
+  --data-root . \
+  --checkpoint runs/stage1/checkpoints/best.pt \
+  --out-dir runs/stage1/infer \
+  --num-samples 8 \
+  --crop center
+```
+
 ## 出力
 
 - `runs/stage1/checkpoints/best.pt` : ベストモデル

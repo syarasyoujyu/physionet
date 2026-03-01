@@ -20,3 +20,16 @@ python3 -m stage2.train \
   --batch-size 16 \
   --patch-size 256
 ```
+
+## 推論（可視化）
+
+推論結果とGT（波形マスク）をmatplotlibで並べて保存します。
+
+```bash
+python3 -m stage2.inference \
+  --data-root . \
+  --checkpoint runs/stage2/checkpoints/best.pt \
+  --out-dir runs/stage2/infer \
+  --num-samples 8 \
+  --crop center
+```
