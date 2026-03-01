@@ -41,6 +41,8 @@ python3 -m stage1.inference \
   --crop center
 ```
 
+交点マスクは非常に疎（点）なので、可視化では `--dot-radius` で点を膨張して見やすくしています。
+
 ## 出力
 
 - `runs/stage1/checkpoints/best.pt` : ベストモデル

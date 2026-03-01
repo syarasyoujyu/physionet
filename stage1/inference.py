@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from PIL import Image
+import torch.nn.functional as F
 
 from stage1.data import (
+    GridIntersectionPatchDataset,
     Record,
-    _auto_grid_intersection_mask,
     _load_json,
     _load_rgb,
     _pil_mask_to_hw_float01,
@@ -56,37 +56,6 @@ def _load_checkpoint_state_dict(path: Path) -> dict[str, torch.Tensor]:
     raise TypeError(f"unsupported checkpoint format: {type(obj)}")
 
 
-def _label_path(record: Record, *, mask_suffix: str, label_cache_dir: Path | None) -> Path:
-    if label_cache_dir is None:
-        return record.image_path.with_name(f"{record.stem}{mask_suffix}")
-    return label_cache_dir / f"{record.stem}{mask_suffix}"
-
-
-def _load_or_make_label(
-    record: Record,
-    *,
-    rgb: Image.Image,
-    meta: dict,
-    label_source: str,
-    mask_suffix: str,
-    label_cache_dir: Path | None,
-) -> Image.Image:
-    lp = _label_path(record, mask_suffix=mask_suffix, label_cache_dir=label_cache_dir)
-    if label_source == "file":
-        if not lp.exists():
-            raise FileNotFoundError(f"label not found: {lp}")
-        return Image.open(lp).convert("L")
-
-    if lp.exists():
-        return Image.open(lp).convert("L")
-
-    mask = _auto_grid_intersection_mask(rgb, meta)
-    if label_cache_dir is not None:
-        label_cache_dir.mkdir(parents=True, exist_ok=True)
-        mask.save(lp)
-    return mask
-
-
 def _center_crop_box(w: int, h: int, size: int) -> tuple[int, int, int, int]:
     if w < size or h < size:
         raise ValueError(f"image smaller than patch: {(w, h)} < {size}")
@@ -98,13 +67,11 @@ def _center_crop_box(w: int, h: int, size: int) -> tuple[int, int, int, int]:
 def _make_samples(
     records: list[Record],
     *,
+    labeler: GridIntersectionPatchDataset,
     num_samples: int,
     seed: int,
     patch_size: int,
     crop: str,
-    label_source: str,
-    mask_suffix: str,
-    label_cache_dir: Path | None,
 ) -> list[Sample]:
     rng = random.Random(seed)
     out: list[Sample] = []
@@ -115,14 +82,8 @@ def _make_samples(
         r = records[i % len(records)]
         rgb = _load_rgb(r.image_path)
         meta = _load_json(r.json_path)
-        label = _load_or_make_label(
-            r,
-            rgb=rgb,
-            meta=meta,
-            label_source=label_source,
-            mask_suffix=mask_suffix,
-            label_cache_dir=label_cache_dir,
-        )
+        # stage1.data の GridIntersectionPatchDataset._load_or_make_label を利用して交点マスクを生成/読込
+        label = labeler._load_or_make_label(r, rgb, meta)
         w, h = rgb.size
         if crop == "center":
             box = _center_crop_box(w, h, patch_size)
@@ -137,12 +98,26 @@ def _make_samples(
     return out
 
 
+def _dilate_points(mask01: torch.Tensor, *, radius: int) -> torch.Tensor:
+    """
+    交点マスクは点が小さく見えにくいので、可視化用に膨張する（学習/推論自体には使わない）。
+    mask01: (N,1,H,W) or (1,H,W) values in [0,1]
+    """
+    if radius <= 0:
+        return mask01
+    if mask01.ndim == 3:
+        mask01 = mask01.unsqueeze(0)
+    k = int(2 * radius + 1)
+    return F.max_pool2d(mask01, kernel_size=k, stride=1, padding=radius)
+
+
 def _save_grid_figure(
     out_path: Path | None,
     *,
     samples: list[Sample],
     probs: torch.Tensor,  # (N,1,H,W)
     threshold: float,
+    dot_radius: int,
     dpi: int,
     title: str,
     show: bool,
@@ -160,17 +135,20 @@ def _save_grid_figure(
     ncols = 4
     fig, axes = plt.subplots(n, ncols, figsize=(ncols * 3.2, max(1, n) * 3.2), squeeze=False)
     pred_bin = (probs >= float(threshold)).float()
+    gt = torch.stack([s.y for s in samples], dim=0)
+    gt_vis = _dilate_points(gt, radius=int(dot_radius))
+    pred_vis = _dilate_points(pred_bin, radius=int(dot_radius))
 
     for i, s in enumerate(samples):
         rgb = s.x.clamp(0, 1).permute(1, 2, 0).numpy()
-        gt = s.y[0].clamp(0, 1).numpy()
         pr_prob = probs[i, 0].clamp(0, 1).cpu().numpy()
-        pr = pred_bin[i, 0].clamp(0, 1).cpu().numpy()
+        gt_i = gt_vis[i, 0].clamp(0, 1).cpu().numpy()
+        pr = pred_vis[i, 0].clamp(0, 1).cpu().numpy()
 
         axes[i, 0].imshow(rgb)
         axes[i, 0].set_title(f"input\n{s.stem}")
-        axes[i, 1].imshow(gt, cmap="gray", vmin=0, vmax=1)
-        axes[i, 1].set_title("GT")
+        axes[i, 1].imshow(gt_i, cmap="gray", vmin=0, vmax=1)
+        axes[i, 1].set_title("GT(dilated)")
         axes[i, 2].imshow(pr_prob, cmap="magma", vmin=0, vmax=1)
         axes[i, 2].set_title("pred(prob)")
         axes[i, 3].imshow(pr, cmap="gray", vmin=0, vmax=1)
@@ -209,6 +187,7 @@ def main() -> None:
     p.add_argument("--mask-suffix", type=str, default="_grid_mask.png")
     p.add_argument("--label-cache-dir", type=str, default="runs/stage1/labels_cache")
     p.add_argument("--threshold", type=float, default=0.5)
+    p.add_argument("--dot-radius", type=int, default=2, help="dilation radius for displaying sparse point masks")
     p.add_argument("--dpi", type=int, default=150)
     p.add_argument("--show", action="store_true", help="show figure window (may not work on headless env)")
     p.add_argument("--no-save", action="store_true", help="do not save figure (use with --show)")
@@ -232,15 +211,23 @@ def main() -> None:
     if args.label_source == "auto" and args.label_cache_dir:
         label_cache_dir = Path(args.label_cache_dir)
 
+    labeler = GridIntersectionPatchDataset(
+        records,
+        patch_size=int(args.patch_size),
+        samples_per_epoch=1,
+        seed=int(args.seed),
+        label_source=str(args.label_source),  # type: ignore[arg-type]
+        mask_suffix=str(args.mask_suffix),
+        label_cache_dir=label_cache_dir,
+    )
+
     samples = _make_samples(
         records,
+        labeler=labeler,
         num_samples=int(args.num_samples),
         seed=int(args.seed),
         patch_size=int(args.patch_size),
         crop=str(args.crop),
-        label_source=str(args.label_source),
-        mask_suffix=str(args.mask_suffix),
-        label_cache_dir=label_cache_dir,
     )
 
     model = UNetRes(in_channels=3, base_channels=int(args.base_channels), out_channels=1)
@@ -266,6 +253,7 @@ def main() -> None:
         samples=samples,
         probs=probs,
         threshold=float(args.threshold),
+        dot_radius=int(args.dot_radius),
         dpi=int(args.dpi),
         title="stage1 inference",
         show=bool(args.show),
