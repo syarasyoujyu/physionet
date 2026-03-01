@@ -65,12 +65,85 @@ def _pil_mask_to_hw_float01(mask: Image.Image) -> torch.Tensor:
     return torch.from_numpy(arr).unsqueeze(0).contiguous()
 
 
+def _clamp_int(v: float, lo: int, hi: int) -> int:
+    return int(min(hi, max(lo, round(v))))
+
+
 def _random_crop_box(w: int, h: int, size: int, rng: random.Random) -> tuple[int, int, int, int]:
     if w < size or h < size:
         raise ValueError(f"image smaller than patch: {(w, h)} < {size}")
     left = rng.randint(0, w - size)
     top = rng.randint(0, h - size)
     return left, top, left + size, top + size
+
+
+def _grid_positions(length: int, spacing: float, offset: float) -> list[int]:
+    if length <= 0 or not np.isfinite(spacing) or spacing <= 0:
+        return []
+    start_k = int(np.ceil((0.0 - offset) / spacing))
+    end_k = int(np.floor(((length - 1) - offset) / spacing))
+    coords: list[int] = []
+    prev = None
+    for k in range(start_k, end_k + 1):
+        pos = offset + spacing * k
+        idx = int(round(pos))
+        if 0 <= idx < length and idx != prev:
+            coords.append(idx)
+            prev = idx
+    return coords
+
+
+def _rotate_xy(x: float, y: float, cx: float, cy: float, angle_deg: float) -> tuple[int, int]:
+    theta = np.deg2rad(angle_deg)
+    dx = x - cx
+    dy = y - cy
+    xr = dx * np.cos(theta) - dy * np.sin(theta) + cx
+    yr = dx * np.sin(theta) + dy * np.cos(theta) + cy
+    return int(round(xr)), int(round(yr))
+
+
+def build_grid_intersection_mask_from_json(meta: dict, *, width: int, height: int) -> Image.Image:
+    """
+    json内の x_grid / y_grid と画像サイズから、主要グリッド交点の2値マスクを生成する。
+    generator 側では元キャンバス左上を原点に格子が置かれるため、pad/crop がある場合は
+    json上の width/height と実画像サイズとの差分をオフセットとして扱う。
+    """
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    if not bool(meta.get("gridlines", True)):
+        return Image.fromarray(mask, mode="L")
+
+    try:
+        x_grid = float(meta["x_grid"])
+        y_grid = float(meta["y_grid"])
+    except Exception as e:
+        raise ValueError("json label source requires numeric x_grid and y_grid.") from e
+
+    if not (np.isfinite(x_grid) and np.isfinite(y_grid) and x_grid > 0 and y_grid > 0):
+        raise ValueError(f"invalid grid size in json: x_grid={x_grid!r} y_grid={y_grid!r}")
+
+    meta_width = meta.get("width")
+    meta_height = meta.get("height")
+    try:
+        offset_x = (float(width) - float(meta_width)) / 2.0 if meta_width is not None else 0.0
+        offset_y = (float(height) - float(meta_height)) / 2.0 if meta_height is not None else 0.0
+    except Exception:
+        offset_x = 0.0
+        offset_y = 0.0
+
+    xs = _grid_positions(width, x_grid, offset_x)
+    ys = _grid_positions(height, y_grid, offset_y)
+    angle_value = meta["rotate_applied"] if "rotate_applied" in meta else meta.get("rotate", 0.0)
+    angle = float(angle_value if angle_value is not None else 0.0)
+    cx = (width - 1) / 2.0
+    cy = (height - 1) / 2.0
+
+    for y in ys:
+        for x in xs:
+            xi, yi = _rotate_xy(x, y, cx, cy, angle) if angle else (x, y)
+            if 0 <= xi < width and 0 <= yi < height:
+                mask[yi, xi] = 255
+    return Image.fromarray(mask, mode="L")
 
 
 def _auto_grid_intersection_mask(
@@ -129,7 +202,7 @@ class GridIntersectionPatchDataset(torch.utils.data.Dataset):
         patch_size: int = 256,
         samples_per_epoch: int = 10_000,
         seed: int = 0,
-        label_source: Literal["auto", "file"] = "auto",
+        label_source: Literal["auto", "file", "json"] = "json",
         mask_suffix: str = "_grid_mask.png",
         label_cache_dir: Path | None = None,
     ) -> None:
@@ -152,7 +225,8 @@ class GridIntersectionPatchDataset(torch.utils.data.Dataset):
 
     def _label_path_for_record(self, r: Record) -> Path:
         if self.label_cache_dir is not None:
-            return self.label_cache_dir / f"{r.stem}{self.mask_suffix}"
+            cache_root = self.label_cache_dir / self.label_source
+            return cache_root / f"{r.stem}{self.mask_suffix}"
         return r.image_path.with_name(f"{r.stem}{self.mask_suffix}")
 
     def _load_or_make_label(self, r: Record, rgb: Image.Image, meta: dict) -> Image.Image:
@@ -162,11 +236,22 @@ class GridIntersectionPatchDataset(torch.utils.data.Dataset):
                 raise FileNotFoundError(f"label not found: {label_path}")
             return Image.open(label_path).convert("L")
 
+        if self.label_source == "json":
+            if label_path.exists():
+                return Image.open(label_path).convert("L")
+            w, h = rgb.size
+            mask = build_grid_intersection_mask_from_json(meta, width=w, height=h)
+            if self.label_cache_dir is not None:
+                label_path.parent.mkdir(parents=True, exist_ok=True)
+                mask.save(label_path)
+            return mask
+
         if label_path.exists():
             return Image.open(label_path).convert("L")
 
         mask = _auto_grid_intersection_mask(rgb, meta)
         if self.label_cache_dir is not None:
+            label_path.parent.mkdir(parents=True, exist_ok=True)
             mask.save(label_path)
         return mask
 
@@ -189,7 +274,7 @@ class GridIntersectionPatchDataset(torch.utils.data.Dataset):
 def precompute_grid_intersection_labels(
     records: list[Record],
     *,
-    label_source: Literal["auto", "file"] = "auto",
+    label_source: Literal["auto", "file", "json"] = "json",
     mask_suffix: str = "_grid_mask.png",
     label_cache_dir: Path | None = None,
     progress: bool = True,
@@ -202,6 +287,7 @@ def precompute_grid_intersection_labels(
         return {"seen": len(records), "created": 0, "skipped": len(records)}
 
     if label_cache_dir is not None:
+        label_cache_dir = label_cache_dir / label_source
         label_cache_dir.mkdir(parents=True, exist_ok=True)
 
     seen = 0
@@ -223,7 +309,11 @@ def precompute_grid_intersection_labels(
 
         rgb = _load_rgb(r.image_path)
         meta = _load_json(r.json_path)
-        mask = _auto_grid_intersection_mask(rgb, meta)
+        w, h = rgb.size
+        if label_source == "json":
+            mask = build_grid_intersection_mask_from_json(meta, width=w, height=h)
+        else:
+            mask = _auto_grid_intersection_mask(rgb, meta)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         mask.save(out_path)
         created += 1

@@ -196,7 +196,7 @@ def main() -> None:
         default=None,
         help="fraction of records used for training (overrides --val-fraction)",
     )
-    p.add_argument("--label-source", type=str, choices=["auto", "file"], default="auto")
+    p.add_argument("--label-source", type=str, choices=["auto", "file", "json"], default="json")
     p.add_argument("--mask-suffix", type=str, default="_grid_mask.png")
     p.add_argument("--label-cache-dir", type=str, default="runs/stage1/labels_cache")
     p.add_argument("--pos-weight", type=float, default=None)
@@ -236,7 +236,7 @@ def main() -> None:
         device=args.device,
         label_source=args.label_source,
         mask_suffix=args.mask_suffix,
-        label_cache_dir=args.label_cache_dir if args.label_source == "auto" else None,
+        label_cache_dir=args.label_cache_dir if args.label_source != "file" else None,
         pos_weight=args.pos_weight,
         log_level=args.log_level,
         log_interval=args.log_interval,

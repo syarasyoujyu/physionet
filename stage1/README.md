@@ -8,9 +8,13 @@
 - `xxxx.json`: メタデータ（例: `0011/37579740.json`）
 
 本リポジトリの例データには、明示的なグリッド交点マスクが付属していません。
-そのためデフォルトでは、画像からグリッド線を抽出→コーナー検出で交点ラベルを自動生成します（OpenCV必須）。
+ただし `xxxx.json` には generator が使った `x_grid` / `y_grid` が入っているため、
+デフォルトではその情報から主要グリッド交点マスクを直接再構成します。
+augment 時に `rotate_applied` が入っている JSON では、その回転も反映します。
 
-もし手元に正解マスクがある場合は、`--label-source file --mask-suffix _grid_mask.png` のように指定してください。
+もし JSON の格子情報が信頼できないデータであれば、`--label-source auto` で
+画像からグリッド線を抽出→コーナー検出に戻せます（OpenCV必須）。
+手元に正解マスクがある場合は、`--label-source file --mask-suffix _grid_mask.png` を指定してください。
 
 ## 学習
 

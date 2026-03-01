@@ -183,7 +183,7 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--crop", type=str, choices=["random", "center"], default="center")
-    p.add_argument("--label-source", type=str, choices=["auto", "file"], default="auto")
+    p.add_argument("--label-source", type=str, choices=["auto", "file", "json"], default="json")
     p.add_argument("--mask-suffix", type=str, default="_grid_mask.png")
     p.add_argument("--label-cache-dir", type=str, default="runs/stage1/labels_cache")
     p.add_argument("--threshold", type=float, default=0.5)
@@ -208,7 +208,7 @@ def main() -> None:
         raise ValueError("no records found (need matching .png and .json).")
 
     label_cache_dir = None
-    if args.label_source == "auto" and args.label_cache_dir:
+    if args.label_source != "file" and args.label_cache_dir:
         label_cache_dir = Path(args.label_cache_dir)
 
     labeler = GridIntersectionPatchDataset(
