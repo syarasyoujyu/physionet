@@ -160600,5 +160600,6 @@
     "crop": 0,
     "temperature": 16219,
     "rotate": 0,
+    "rotate_applied":0,
     "noise": 29
 }
